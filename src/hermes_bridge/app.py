@@ -127,18 +127,45 @@ class Bridge:
                 continue
             if auth:
                 self._authorize(headers)
-            if gate:
-                self._ensure_compatible()
             params = {k: _unquote(v) for k, v in match.groupdict().items()}
             for v in params.values():
                 if any(seg in (".", "..") for seg in v.split("/")) or any(ord(c) < 32 for c in v):
                     raise HttpError(400, "invalid_path", "Path parameters may not contain '.', '..' or control characters.")
             if "p" in params and not PROFILE_ID_RE.match(params["p"]):
                 raise HttpError(400, "invalid_profile", "Profile ids are lowercase letters, digits, '-' and '_'.")
-            return fn(query=query, body=_json_body(body) if method in ("POST", "PUT") else None, **params)
+            if "p" in params and not self._profile_allowed(params["p"]):
+                raise HttpError(403, "profile_denied", "This profile is outside the mobile bridge scope.")
+            if self.cfg.mobile_scope and fn == self.restart_gateway:
+                raise HttpError(403, "restart_denied", "Gateway restart is disabled for the mobile bridge.")
+            parsed_body = _json_body(body) if method in ("POST", "PUT") else None
+            if self.cfg.mobile_scope:
+                for source in (query, parsed_body or {}):
+                    if "clone_from" in source:
+                        raise HttpError(403, "clone_denied", "Profile cloning is disabled for the mobile bridge.")
+                    if "profile" in source and source["profile"] != params.get("p"):
+                        raise HttpError(403, "profile_denied", "Profile overrides are not allowed; use the scoped profile path.")
+            if self.cfg.mobile_scope and fn == self.create_profile:
+                assert parsed_body is not None
+                name = parsed_body.get("name")
+                prefix = self.cfg.new_profile_prefix
+                if (not isinstance(name, str) or not PROFILE_ID_RE.fullmatch(name)
+                        or not prefix or not name.startswith(prefix) or len(name) <= len(prefix)):
+                    raise HttpError(403, "profile_denied", "New profiles must use the configured mobile prefix and a nonempty suffix.")
+            if gate:
+                self._ensure_compatible()
+            return fn(query=query, body=parsed_body, **params)
         if allowed:
             raise HttpError(405, "method_not_allowed", f"{method} is not allowed on {path}")
         raise HttpError(404, "not_found", "No such bridge endpoint.")
+
+    def _profile_allowed(self, profile: str) -> bool:
+        if not self.cfg.mobile_scope:
+            return True
+        if not isinstance(profile, str) or not PROFILE_ID_RE.fullmatch(profile):
+            return False
+        return (profile in (self.cfg.allowed_profiles or ())
+                or bool(self.cfg.new_profile_prefix and profile.startswith(self.cfg.new_profile_prefix)
+                        and len(profile) > len(self.cfg.new_profile_prefix)))
 
     def _authorize(self, headers: dict[str, str]) -> None:
         auth = headers.get("authorization", "")
@@ -223,7 +250,7 @@ class Bridge:
         out = []
         for p in body.get("profiles", []):
             name = p.get("name")
-            if not name:
+            if not name or not self._profile_allowed(name):
                 continue
             out.append({
                 "id": name, "display_name": p.get("display_name") or name,
@@ -491,6 +518,9 @@ class Bridge:
                 commands.append({"name": name, "description": pair[1][:300], "category": str(cat.get("name") or ""),
                                  "aliases": sorted(aliases.get(pair[0], []))})
         plugins = [n.lstrip("/") for n in (body.get("plugin_commands") or {}) if isinstance(n, str)]
+        if self.cfg.mobile_scope:
+            commands = [{**c, "aliases": []} for c in commands if c["name"] in ("status", "help", "title")]
+            plugins = []
         return 200, {"commands": commands, "plugin_commands": plugins}
 
     def commands_run(self, p: str, body: dict, **_) -> Result:
@@ -502,6 +532,14 @@ class Bridge:
             raise HttpError(400, "invalid_body", "command must be a slash command like /status (up to 4000 characters)")
         if set(body) - {"session_id", "command"}:
             raise HttpError(400, "invalid_body", "Only session_id and command are accepted.")
+        if self.cfg.mobile_scope:
+            # Fail closed: unknown/plugin/user aliases can invoke arbitrary handlers. Only a
+            # small non-escalating command surface is available to a scoped mobile key.
+            simple = command in ("/status", "/help")
+            title = (command.startswith("/title ") and bool(command[7:].strip())
+                     and all(c.isprintable() and c not in "/%;|&\\" for c in command[7:]))
+            if not (simple or title):
+                raise HttpError(403, "command_denied", "Mobile commands are limited to /status, /help and single-line /title text.")
         result = self._gateway(p, "slash.exec", {"session_id": session_id, "command": command})
         result = result if isinstance(result, dict) else {}
         if result.get("type") == "send" and isinstance(result.get("message"), str):

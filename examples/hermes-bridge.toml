@@ -1,6 +1,11 @@
 # hermes-bridge configuration. Every key can also be set with an environment variable
 # (shown on the right); environment variables win over this file.
 
+# Mobile least-privilege scope. Reserve this prefix exclusively for mobile-owned profiles.
+# Omit BOTH settings only when intentionally retaining legacy, unrestricted management.
+allowed_profiles = ["default"]                  # HERMES_BRIDGE_ALLOWED_PROFILES: comma-separated IDs in env
+new_profile_prefix = "mobile-"                  # HERMES_BRIDGE_NEW_PROFILE_PREFIX
+
 listen = "127.0.0.1:8765"                         # HERMES_BRIDGE_LISTEN
 dashboard_url = "http://127.0.0.1:9120"           # HERMES_BRIDGE_DASHBOARD_URL
 dashboard_token_file = "/etc/hermes-bridge/dashboard-token"  # HERMES_BRIDGE_DASHBOARD_TOKEN_FILE

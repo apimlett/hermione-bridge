@@ -30,7 +30,11 @@ def make_handler(bridge: Bridge):
                 return self._send(413, {"error": {"code": "body_too_large", "message": "Body too large."}})
             body = self.rfile.read(length) if length else b""
             headers = {k.lower(): v for k, v in self.headers.items()}
-            status, payload = bridge.handle(method, parts.path, dict(parse_qsl(parts.query)), headers, body)
+            pairs = parse_qsl(parts.query, keep_blank_values=bridge.cfg.mobile_scope)
+            query = dict(pairs)
+            if bridge.cfg.mobile_scope and len(query) != len(pairs):
+                return self._send(400, {"error": {"code": "invalid_query", "message": "Duplicate query parameters are not allowed."}})
+            status, payload = bridge.handle(method, parts.path, query, headers, body)
             self._send(status, payload)
 
         def _send(self, status: int, payload) -> None:

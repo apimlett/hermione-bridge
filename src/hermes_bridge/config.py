@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import re
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
@@ -13,6 +14,8 @@ ENV = {
     "key_file": "HERMES_BRIDGE_KEY_FILE",
     "base_path": "HERMES_BRIDGE_BASE_PATH",
     "dashboard_profile": "HERMES_BRIDGE_DASHBOARD_PROFILE",
+    "allowed_profiles": "HERMES_BRIDGE_ALLOWED_PROFILES",
+    "new_profile_prefix": "HERMES_BRIDGE_NEW_PROFILE_PREFIX",
     "timeout": "HERMES_BRIDGE_TIMEOUT",
     "hermes_home": "HERMES_BRIDGE_HERMES_HOME",
 }
@@ -33,6 +36,24 @@ class Config:
     dashboard_profile: str = "default"  # the profile the dashboard backend was launched as
     timeout: float = 30.0
     hermes_home: Path = Path("~/.hermes")  # Hermes's root home (profiles live in <root>/profiles/<name>)
+
+    allowed_profiles: tuple[str, ...] | None = None
+    new_profile_prefix: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.allowed_profiles is not None:
+            if (not isinstance(self.allowed_profiles, tuple)
+                    or any(not isinstance(p, str) or not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", p)
+                           or p == "all" for p in self.allowed_profiles)):
+                raise ConfigError("allowed_profiles must contain valid profile ids (not 'all')")
+        if self.new_profile_prefix is not None:
+            if (not isinstance(self.new_profile_prefix, str)
+                    or not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,61}[-_]", self.new_profile_prefix)):
+                raise ConfigError("new_profile_prefix must be a lowercase profile prefix ending in '-' or '_' (2-63 characters)")
+
+    @property
+    def mobile_scope(self) -> bool:
+        return self.allowed_profiles is not None or self.new_profile_prefix is not None
 
     def dashboard_token(self) -> str:
         return _read_secret(self.dashboard_token_file, "dashboard token")
@@ -61,7 +82,7 @@ def load(config_file: str | None = None, environ: dict | None = None) -> Config:
         with open(config_file, "rb") as fh:
             raw = tomllib.load(fh)
     for key, var in ENV.items():
-        if env.get(var):
+        if var in env and (key in ("allowed_profiles", "new_profile_prefix") or env[var]):
             raw[key] = env[var]
     listen = str(raw.get("listen", "127.0.0.1:8765"))
     host, _, port = listen.rpartition(":")
@@ -77,6 +98,10 @@ def load(config_file: str | None = None, environ: dict | None = None) -> Config:
         host=host.strip("[]"), port=int(port),
         dashboard_url=str(raw.get("dashboard_url", "http://127.0.0.1:9120")).rstrip("/"),
         dashboard_token_file=Path(raw["dashboard_token_file"]), key_file=Path(raw["key_file"]),
+        allowed_profiles=(tuple(x.strip(" ") for x in raw["allowed_profiles"].split(",") if x.strip(" "))
+                          if isinstance(raw.get("allowed_profiles"), str)
+                          else tuple(raw["allowed_profiles"]) if "allowed_profiles" in raw else None),
+        new_profile_prefix=raw.get("new_profile_prefix"),
         base_path=base, dashboard_profile=str(raw.get("dashboard_profile", "default")),
         timeout=float(raw.get("timeout", 30)),
         hermes_home=Path(str(raw.get("hermes_home", "~/.hermes"))).expanduser())

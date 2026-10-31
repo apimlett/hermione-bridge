@@ -208,12 +208,60 @@ Environment variables, or keys in a TOML file passed with `--config` (environmen
 | `HERMES_BRIDGE_KEY_FILE` | required | File holding the bridge key clients send as `Authorization: Bearer` (16+ chars). |
 | `HERMES_BRIDGE_BASE_PATH` | none | Prefix to strip (e.g. `/bridge`) if the proxy doesn't. |
 | `HERMES_BRIDGE_DASHBOARD_PROFILE` | `default` | Profile the backend runs as. Plugin toggles and installs only work for it (a Hermes limit). |
+| `HERMES_BRIDGE_ALLOWED_PROFILES` | unset (legacy) | Comma-separated existing profile IDs. TOML: `allowed_profiles = ["default"]`. Empty means no explicit IDs, not unrestricted. |
+| `HERMES_BRIDGE_NEW_PROFILE_PREFIX` | unset | Reserved new-profile namespace, e.g. `mobile-`. Either scope setting activates mobile safety controls. |
 | `HERMES_BRIDGE_TIMEOUT` | `30` | Seconds per Hermes call. |
 | `HERMES_BRIDGE_HERMES_HOME` | `~/.hermes` | Hermes's root home, for slash commands. Profile `<p>` is `<root>/profiles/<p>`. |
 
 CLI: `hermes-bridge serve` (default), `hermes-bridge init --key-file … --dashboard-token-file …` (creates
 missing secret files, never prints them), `hermes-bridge check` (prints the compatibility report; exit 1 if
 incompatible).
+
+## Mobile profile scope (recommended)
+
+The example TOML enables a server-side scope; using environment-only setup or the example
+service units requires setting these explicitly in the **bridge process** environment:
+
+```bash
+HERMES_BRIDGE_ALLOWED_PROFILES=default
+HERMES_BRIDGE_NEW_PROFILE_PREFIX=mobile-
+```
+
+Equivalent TOML:
+
+```toml
+allowed_profiles = ["default"]
+new_profile_prefix = "mobile-"
+```
+
+With either setting present, scoped mode is enabled:
+
+- The roster contains only explicitly allowed IDs and valid IDs in the reserved prefix
+  namespace (with a nonempty suffix). Other profiles' key flags are never fetched.
+- All profile endpoints, including commands and key rotation, reject other IDs with
+  `403 profile_denied` **before any upstream call**, including compatibility probes.
+  Path IDs are decoded and validated first; query/body `profile` overrides cannot change them.
+- New profiles must have a valid prefixed ID, such as `mobile-research`. There is no silent
+  renaming or cloning: `clone_from` is forbidden, even for `default` or another mobile profile.
+- `POST /v1/gateway/restart` is blocked. The bridge must not restart its own gateway.
+- Slash commands fail closed: only exact `/status`, exact `/help`, and `/title text` are
+  permitted. `/yolo`, restart commands, unknown commands, aliases, user/plugin commands, and
+  multiline/split commands are denied locally. Title text must be printable and cannot
+  include `/`, `%`, `;`, `|`, `&` or backslash. The command catalog exposes only this allowlist.
+- Duplicate query parameters are rejected, including percent-encoded duplicate names;
+  blank profile overrides are rejected rather than silently discarded.
+
+Reserve `mobile-` exclusively for mobile-owned profiles **before enabling the scope**: matching
+existing IDs are accessible too; the bridge does not maintain a creation/ownership registry.
+If you need to protect every existing profile, use `allowed_profiles = []` and choose an unused
+prefix. An explicit empty environment allowlist also means no explicitly allowed IDs; it does
+not disable scope. Omit the prefix to disable creation entirely. Prefixes must be 2–63
+lowercase profile-ID characters, ending in `-` or `_`; invalid settings fail startup.
+
+Omitting **both** settings preserves the original unrestricted upstream behavior for trusted
+legacy clients. `dashboard_profile` is only the dashboard's plugin capability selector, **not**
+an authorization boundary. This scope protects the bridge API, not the separate chat API or
+arbitrary tools an agent can run: keep per-profile chat credentials and OS isolation separate.
 
 ## API
 
