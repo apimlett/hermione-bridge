@@ -64,6 +64,19 @@ class WorkersTest(unittest.TestCase):
             self.assertEqual(self.request(profile='private')[0], 403)
             self.assertEqual(self.request(headers={})[0], 401)
 
+    def test_authorized_request_reaches_snapshot_path_before_disk(self):
+        # Capability on + correct key/scope means the adapter actually reads the
+        # store: an early-return that swallowed the read could not be detected
+        # by the negative-only test above.
+        object.__setattr__(self.cfg, 'worker_observability', True)
+        with patch('hermes_bridge.workers.snapshot', return_value={
+            'capability': 'ledger-v1', 'workers': [], 'hasMore': False, 'push': 'blocked'
+        }) as mock:
+            code, body = self.request()
+        self.assertEqual(code, 200)
+        self.assertEqual(body, {'capability': 'ledger-v1', 'workers': [], 'hasMore': False, 'push': 'blocked'})
+        mock.assert_called_once_with(self.home, 'default')
+
     def test_partial_child_result_does_not_settle_sibling(self):
         object.__setattr__(self.cfg, 'worker_observability', True)
         with closing(sqlite3.connect(self.db)) as c, c:
@@ -84,7 +97,21 @@ class WorkersTest(unittest.TestCase):
 
     def test_unknown_states_missing_child_and_malformed_metadata_never_invent_success(self):
         object.__setattr__(self.cfg, 'worker_observability', True)
-        for state, result, expected in [('completed', {}, 'unknown'), ('future-state', {}, 'unknown'), ('interrupted', {}, 'interrupted'), ('running', {'results': [{'task_index': 0, 'status': ['invalid']}]}, 'unknown'), ('finalizing', {}, 'running')]:
+        for state, result, expected in [
+            # No results at all: missing-or-invalid child state -> unknown.
+            ('completed', {}, 'unknown'),
+            ('future-state', {}, 'unknown'),
+            ('interrupted', {}, 'interrupted'),
+            # Status field missing from a non-empty entry: do not inherit the
+            # delegation's state, including 'completed' which would otherwise invent
+            # success.
+            ('completed', {'results': [{'task_index': 0}]}, 'unknown'),
+            ('completed', {'results': [{'task_index': 0, 'summary': 'SECRET'}]}, 'unknown'),
+            ('running', {'results': [{'task_index': 0}]}, 'unknown'),
+            # Existing malformed-status case and the finalizing override.
+            ('running', {'results': [{'task_index': 0, 'status': ['invalid']}]}, 'unknown'),
+            ('finalizing', {}, 'running'),
+        ]:
             with self.subTest(state=state, result=result):
                 with closing(sqlite3.connect(self.db)) as c, c:
                     c.execute('UPDATE async_delegations SET state=?, task_json=?, result_json=?', (state, json.dumps({'is_batch': False}), json.dumps(result)))
@@ -93,6 +120,11 @@ class WorkersTest(unittest.TestCase):
                 self.assertEqual(body['workers'][0]['state'], expected)
                 if expected == 'unknown':
                     self.assertIn('unknown', body['workers'][0]['activity'].lower())
+                # No invented success ever carries a real completion event id.
+                entries = result.get('results') if isinstance(result.get('results'), list) else []
+                first = entries[0] if entries else {}
+                if state == 'completed' and 'status' not in first:
+                    self.assertIsNone(body['workers'][0]['eventId'], 'missing child status must not produce a completion event id')
 
     def test_truncation_is_explicit_for_task_indexes_beyond_snapshot_bound(self):
         self.cfg = replace(self.cfg, worker_observability=True)

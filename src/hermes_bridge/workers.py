@@ -16,6 +16,9 @@ from .gateway import profile_home
 
 _ID = re.compile(r'[A-Za-z0-9_-]{1,160}')
 _STATES = {'running', 'completed', 'failed', 'cancelled', 'interrupted', 'unknown'}
+# Terminal states are known outcomes; an unknown state must not advertise a
+# completion event id to the client.
+_TERMINAL_STATES = {'completed', 'failed', 'cancelled', 'interrupted'}
 
 
 def _id(value):
@@ -75,15 +78,39 @@ def snapshot(root: Path, profile: str) -> dict:
         finished = {e.get('task_index', 0): e for e in entries if isinstance(e, dict) and type(e.get('task_index', 0)) is int}
         for i in indexes:
             entry = finished.get(i, {})
-            recorded = entry.get('status') or state
-            normalized = recorded if isinstance(recorded, str) and recorded in _STATES else 'unknown'
-            if recorded == 'finalizing':
-                normalized = 'running'
-            # A unit can be completed while a child result is missing: no invented success.
-            if state == 'completed' and not entry:
+            # An entry that exists but carries no status field must not inherit the
+            # delegation's state: a `completed` delegation with a child record whose
+            # status is missing would otherwise report success and emit a completion
+            # event id. Treat the absence as unknown and never invent a terminal.
+            has_status_field = isinstance(entry, dict) and 'status' in entry
+            if has_status_field:
+                status_value = entry.get('status')
+                if status_value == 'finalizing':
+                    normalized = 'running'
+                elif isinstance(status_value, str) and status_value in _STATES:
+                    normalized = status_value
+                else:
+                    normalized = 'unknown'
+            elif entry:
+                # Entry exists but status field is absent: do not trust the parent.
                 normalized = 'unknown'
+            else:
+                # No per-child entry: fall back to the delegation state if it is
+                # known; otherwise unknown. An entry-less `completed` delegation
+                # cannot claim a child outcome on its own. `finalizing` is a
+                # transitional delegation state and is reported as `running` so the
+                # client never treats a still-finalizing child as terminal.
+                if state == 'finalizing':
+                    normalized = 'running'
+                elif state == 'completed' or state not in _STATES:
+                    normalized = 'unknown'
+                else:
+                    normalized = state
             wid = f'{did}:{i}'
-            terminal = normalized != 'running'
+            # `unknown` is not a verified terminal outcome: do not emit a
+            # notification-bearing event id and do not advertise a completion
+            # to the client. Only known terminal states get an event id.
+            terminal = normalized in _TERMINAL_STATES
             event = f'{wid}:{normalized}' if terminal else None
             workers.append({'id': wid, 'delegationId': did, 'taskIndex': i, 'profile': profile,
                 'parentSessionId': _id(parent), 'parentRunId': None, 'parentJobId': None,
