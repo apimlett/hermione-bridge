@@ -66,6 +66,7 @@ class Bridge:
         r("POST", rf"/v1/profiles/(?P<p>{NAME_RE})/key", self.rotate_key)
         r("POST", r"/v1/gateway/restart", self.restart_gateway)
         P = rf"/v1/profiles/(?P<p>{NAME_RE})"
+        r("GET", P + r"/workers", self.workers, gate=False)
         r("GET", P + r"/mcp", self.mcp_list)
         r("POST", P + r"/mcp", self.mcp_add)
         r("DELETE", P + rf"/mcp/(?P<name>{NAME_RE})", self.mcp_remove)
@@ -238,6 +239,12 @@ class Bridge:
         raise _upstream_error(resp)
 
     # ------------------------------------------------------------------ endpoints
+    def workers(self, p, **_) -> Result:
+        if not getattr(self.cfg, "worker_observability", False):
+            return 200, {"capability": "disabled", "workers": [], "hasMore": False, "push": "blocked"}
+        from .workers import snapshot
+        return 200, snapshot(self.cfg.hermes_home, p)
+
     def health(self, **_) -> Result:
         return 200, {"ok": True, "service": "hermes-bridge", "version": __version__}
 

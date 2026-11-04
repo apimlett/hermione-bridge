@@ -18,6 +18,7 @@ ENV = {
     "new_profile_prefix": "HERMES_BRIDGE_NEW_PROFILE_PREFIX",
     "timeout": "HERMES_BRIDGE_TIMEOUT",
     "hermes_home": "HERMES_BRIDGE_HERMES_HOME",
+    "worker_observability": "HERMES_BRIDGE_WORKER_OBSERVABILITY",
 }
 
 
@@ -39,8 +40,11 @@ class Config:
 
     allowed_profiles: tuple[str, ...] | None = None
     new_profile_prefix: str | None = None
+    worker_observability: bool = False
 
     def __post_init__(self) -> None:
+        if type(self.worker_observability) is not bool:
+            raise ConfigError("worker_observability must be a boolean")
         if self.allowed_profiles is not None:
             if (not isinstance(self.allowed_profiles, tuple)
                     or any(not isinstance(p, str) or not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", p)
@@ -82,8 +86,13 @@ def load(config_file: str | None = None, environ: dict | None = None) -> Config:
         with open(config_file, "rb") as fh:
             raw = tomllib.load(fh)
     for key, var in ENV.items():
-        if var in env and (key in ("allowed_profiles", "new_profile_prefix") or env[var]):
+        if var in env and (key in ("allowed_profiles", "new_profile_prefix", "worker_observability") or env[var]):
             raw[key] = env[var]
+    workers = raw.get("worker_observability", False)
+    if isinstance(workers, str) and workers in ("true", "false"):
+        workers = workers == "true"
+    if type(workers) is not bool:
+        raise ConfigError("worker_observability must be true or false")
     listen = str(raw.get("listen", "127.0.0.1:8765"))
     host, _, port = listen.rpartition(":")
     if not host or not port.isdigit():
@@ -102,6 +111,7 @@ def load(config_file: str | None = None, environ: dict | None = None) -> Config:
                           if isinstance(raw.get("allowed_profiles"), str)
                           else tuple(raw["allowed_profiles"]) if "allowed_profiles" in raw else None),
         new_profile_prefix=raw.get("new_profile_prefix"),
+        worker_observability=workers,
         base_path=base, dashboard_profile=str(raw.get("dashboard_profile", "default")),
         timeout=float(raw.get("timeout", 30)),
         hermes_home=Path(str(raw.get("hermes_home", "~/.hermes"))).expanduser())
